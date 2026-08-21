@@ -1,0 +1,52 @@
+{
+  "info": {
+    "_postman_id": "6db8a20c-4be9-4d8c-9a44-000000000002",
+    "name": "SIASE Auth Lambda",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "https://<PREENCHER-DEPOIS-QUE-SUBIRMOS>",
+      "type": "string"
+    },
+    {
+      "key": "cpf",
+      "value": "529.982.247-25",
+      "type": "string"
+    }
+  ],
+  "item": [
+    {
+      "name": "Emitir token por CPF",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "X-Correlation-Id",
+            "value": "{{$guid}}"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"cpf\": \"{{cpf}}\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": {
+          "raw": "{{baseUrl}}/auth/token",
+          "host": ["{{baseUrl}}"],
+          "path": ["auth", "token"]
+        }
+      },
+      "response": []
+    }
+  ]
+}
