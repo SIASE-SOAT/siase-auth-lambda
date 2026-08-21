@@ -1,0 +1,19 @@
+{
+  "name": "siase-auth-lambda",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Lambdas de autenticação, autorização e notificação do SIASE",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node --test",
+    "test:coverage": "node --test"
+  },
+  "dependencies": {
+    "@aws-sdk/client-secrets-manager": "^3.879.0",
+    "jsonwebtoken": "^9.0.2",
+    "pg": "^8.16.3"
+  }
+}
