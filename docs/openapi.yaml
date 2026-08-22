@@ -1,0 +1,89 @@
+openapi: 3.0.3
+info:
+  title: SIASE Authentication API
+  version: 1.0.0
+  description: Emissão de JWT externo por CPF para o SIASE.
+servers:
+#  - url: https://<PREENCHER-DEPOIS-QUE-SUBIRMOS>
+paths:
+  /auth/token:
+    post:
+      summary: Emite token para cliente ativo
+      operationId: issueClientToken
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TokenRequest'
+            example:
+              cpf: 529.982.247-25
+      responses:
+        '200':
+          description: Token emitido
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/CorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenResponse'
+        '400':
+          description: CPF inválido
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: Cliente inativo
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Cliente inexistente
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          description: Erro interno
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+components:
+  headers:
+    CorrelationId:
+      description: Identificador de correlação da requisição.
+      schema:
+        type: string
+        format: uuid
+  schemas:
+    TokenRequest:
+      type: object
+      required: [cpf]
+      properties:
+        cpf:
+          type: string
+          description: CPF com ou sem máscara.
+          example: 529.982.247-25
+    TokenResponse:
+      type: object
+      required: [token, tokenType, expiresIn]
+      properties:
+        token:
+          type: string
+        tokenType:
+          type: string
+          example: Bearer
+        expiresIn:
+          type: string
+          example: 1h
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string

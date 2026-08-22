@@ -1,0 +1,7 @@
+aws_region              = "us-east-1"
+lab_role_arn            = "arn:aws:iam::123456789012:role/LabRole"
+vpc_id                  = "vpc-REPLACE"
+private_subnet_ids      = ["subnet-REPLACE-1", "subnet-REPLACE-2"]
+lambda_security_group_id = "sg-REPLACE"
+jwt_secret_name         = "siase/production/jwt"
+lb_dns_override         = ""
