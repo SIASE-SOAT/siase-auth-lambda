@@ -10,9 +10,10 @@ test('authorizer aceita token externo válido', async () => {
   process.env.JWT_ISSUER = 'siase-auth';
   const originalSend = (await import('@aws-sdk/client-secrets-manager')).SecretsManagerClient.prototype.send;
   (await import('@aws-sdk/client-secrets-manager')).SecretsManagerClient.prototype.send = async () => ({
-    SecretString: JSON.stringify({ secret: 'authorizer-secret' })
+    SecretString: JSON.stringify({ secret: 'c2lhc2UtaW50ZXJvcGVyYWJpbGl0eS1zZWNyZXQtMzJieXRlcyEh' })
   });
-  const token = jwt.sign({ clienteId: 'client-1', roles: ['ROLE_CLIENTE'] }, 'authorizer-secret', {
+  const token = jwt.sign({ clienteId: 'client-1', roles: ['ROLE_CLIENTE'] },
+    Buffer.from('siase-interoperability-secret-32bytes!!'), {
     subject: '52998224725', issuer: 'siase-auth', expiresIn: '1h', algorithm: 'HS256'
   });
   const result = await handler({ identitySource: [`Bearer ${token}`] });

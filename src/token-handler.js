@@ -1,4 +1,6 @@
 import { Pool } from 'pg';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { isValidCpf, normalizeCpf } from './cpf.js';
 import { correlationIdFromEvent, log } from './log.js';
 import { getSecret } from './secrets.js';
@@ -44,6 +46,9 @@ export function createTokenHandler({ getSecretValue = getSecret, poolFactory = c
       log('info', 'Token emitido', { correlationId, subject: cpf, clienteId: String(cliente.id) });
       return response(200, { token, tokenType: 'Bearer', expiresIn: process.env.JWT_EXPIRATION ?? '1h' }, correlationId);
     } catch (error) {
+      if (error instanceof InputError) {
+        return response(400, 'REQUISICAO_INVALIDA', correlationId);
+      }
       log('error', 'Falha ao emitir token', { correlationId, error: error.message });
       return response(500, 'ERRO_INTERNO', correlationId);
     }
@@ -63,7 +68,14 @@ function createPool(config) {
     max: 2,
     idleTimeoutMillis: 10000,
     connectionTimeoutMillis: 5000,
-    ssl: value.ssl === false ? false : { rejectUnauthorized: false }
+    ssl: {
+      ca: readFileSync(
+        process.env.RDS_CA_BUNDLE_PATH
+          ?? fileURLToPath(new URL('../certs/global-bundle.pem', import.meta.url)),
+        'utf8'
+      ),
+      rejectUnauthorized: true
+    }
   });
 }
 
@@ -82,8 +94,24 @@ function parseBody(event) {
   const raw = event.isBase64Encoded
     ? Buffer.from(event.body, 'base64').toString('utf8')
     : event.body;
-  return typeof raw === 'string' ? JSON.parse(raw) : raw;
+  if (typeof raw !== 'string' || !raw.trim()) {
+    throw new InputError('Corpo JSON ausente');
+  }
+  try {
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw new InputError('Corpo JSON deve ser um objeto');
+    }
+    return parsed;
+  } catch (error) {
+    if (error instanceof InputError) {
+      throw error;
+    }
+    throw new InputError('Corpo JSON malformado');
+  }
 }
+
+class InputError extends Error {}
 
 function response(statusCode, body, correlationId) {
   return {
