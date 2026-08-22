@@ -4,7 +4,7 @@ import jwt from 'jsonwebtoken';
 import { createTokenHandler, resetPool } from '../src/token-handler.js';
 
 const cpf = '52998224725';
-const secret = { secret: 'c2lhc2UtaW50ZXJvcGVyYWJpbGl0eS1zZWNyZXQtMzJieXRlcyEh' };
+const secret = { secret: Buffer.alloc(32, 65).toString('base64') };
 
 function event(body, headers = {}) {
   return { body: JSON.stringify(body), headers };
@@ -15,12 +15,14 @@ function setup(rows) {
   const pool = { query: async () => ({ rows }) };
   const handler = createTokenHandler({
     getSecretValue: async arn => arn === 'jwt' ? secret : {
-      host: 'localhost', database: 'siase', user: 'siase', password: 'test'
+      username: 'rds-master', password: 'test'
     },
     poolFactory: () => pool
   });
   process.env.JWT_SECRET_ARN = 'jwt';
   process.env.DB_SECRET_ARN = 'db';
+  process.env.DB_HOST = 'rds.example.internal';
+  process.env.DB_NAME = 'siase';
   process.env.JWT_ISSUER = 'siase-auth';
   return handler;
 }
@@ -71,4 +73,33 @@ test('emite token com os claims externos do contrato', async () => {
   assert.equal(payload.clienteId, 'client-1');
   assert.equal(payload.status, 'ATIVO');
   assert.deepEqual(payload.roles, ['ROLE_CLIENTE']);
+});
+
+test('combina credenciais do segredo RDS com host e nome vindos do ambiente', async () => {
+  resetPool();
+  let poolConfig;
+  const handler = createTokenHandler({
+    getSecretValue: async arn => arn === 'jwt' ? secret : {
+      username: 'rds-master',
+      password: 'master-password'
+    },
+    poolFactory: config => {
+      poolConfig = config;
+      return { query: async () => ({ rows: [] }) };
+    }
+  });
+  process.env.JWT_SECRET_ARN = 'jwt';
+  process.env.DB_SECRET_ARN = 'db';
+  process.env.DB_HOST = 'rds.example.internal';
+  process.env.DB_NAME = 'siase';
+  process.env.JWT_ISSUER = 'siase-auth';
+
+  const result = await handler(event({ cpf }));
+
+  assert.equal(result.statusCode, 404);
+  assert.equal(poolConfig.host, 'rds.example.internal');
+  assert.equal(poolConfig.port, 5432);
+  assert.equal(poolConfig.database, 'siase');
+  assert.equal(poolConfig.user, 'rds-master');
+  assert.equal(poolConfig.password, 'master-password');
 });

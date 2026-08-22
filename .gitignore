@@ -1,0 +1,11 @@
+node_modules/
+.env
+.env.*
+!.env.example
+coverage/
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example
+dist/

@@ -22,7 +22,7 @@ export function createTokenHandler({ getSecretValue = getSecret, poolFactory = c
         getSecretValue(process.env.JWT_SECRET_ARN),
         getSecretValue(process.env.DB_SECRET_ARN)
       ]);
-      const clientPool = pool ??= poolFactory(dbConfig);
+      const clientPool = pool ??= poolFactory(databaseConfig(dbConfig));
       const result = await clientPool.query(
         'SELECT id, ativo FROM clientes WHERE documento = $1',
         [cpf]
@@ -58,12 +58,12 @@ export function createTokenHandler({ getSecretValue = getSecret, poolFactory = c
 export const handler = createTokenHandler();
 
 function createPool(config) {
-  const value = typeof config === 'string' ? JSON.parse(config) : config;
+  const value = databaseConfig(config);
   return new Pool({
     host: value.host,
-    port: Number(value.port ?? 5432),
-    database: value.database ?? value.dbname,
-    user: value.username ?? value.user,
+    port: value.port,
+    database: value.database,
+    user: value.user,
     password: value.password,
     max: 2,
     idleTimeoutMillis: 10000,
@@ -77,6 +77,18 @@ function createPool(config) {
       rejectUnauthorized: true
     }
   });
+}
+
+function databaseConfig(config) {
+  const value = typeof config === 'string' ? JSON.parse(config) : config;
+  return {
+    ...value,
+    host: process.env.DB_HOST ?? value.host,
+    port: Number(value.port ?? 5432),
+    database: process.env.DB_NAME ?? value.database ?? value.dbname,
+    user: value.username ?? value.user,
+    password: value.password
+  };
 }
 
 function requiredSecretField(config, field) {
