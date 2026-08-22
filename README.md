@@ -160,8 +160,6 @@ Os workflows são:
 O deploy depende de `needs: build-test`. A AWS é acessada com OIDC e
 `id-token: write`; não há chave AWS estática, PAT, senha ou SSH.
 
-Crie no GitHub os Environments `homolog` e `production`. Em cada um, crie:
-
 | Tipo | Nome | Descrição |
 | --- | --- | --- |
 | Variable | `AWS_REGION` | Região AWS |
