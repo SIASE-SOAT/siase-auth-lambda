@@ -1,87 +1,3 @@
-resource "aws_secretsmanager_secret" "jwt" {
-  name                    = var.jwt_secret_name
-  recovery_window_in_days = 7
-}
-
-resource "aws_secretsmanager_secret" "db" {
-  name                    = var.db_secret_name
-  recovery_window_in_days = 7
-}
-
-resource "aws_iam_role" "token" {
-  name = "siase-auth-token-${var.environment}"
-
-  assume_role_policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [{
-      Effect    = "Allow"
-      Principal = { Service = "lambda.amazonaws.com" }
-      Action    = "sts:AssumeRole"
-    }]
-  })
-}
-
-resource "aws_iam_role_policy_attachment" "token_vpc" {
-  role       = aws_iam_role.token.name
-  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole"
-}
-
-resource "aws_iam_role_policy" "token_secrets" {
-  role = aws_iam_role.token.id
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [{
-      Effect   = "Allow"
-      Action   = ["secretsmanager:GetSecretValue"]
-      Resource = [aws_secretsmanager_secret.jwt.arn, aws_secretsmanager_secret.db.arn]
-    }]
-  })
-}
-
-resource "aws_iam_role" "authorizer" {
-  name = "siase-auth-authorizer-${var.environment}"
-
-  assume_role_policy = aws_iam_role.token.assume_role_policy
-}
-
-resource "aws_iam_role_policy_attachment" "authorizer_logs" {
-  role       = aws_iam_role.authorizer.name
-  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
-}
-
-resource "aws_iam_role_policy_attachment" "authorizer_vpc" {
-  role       = aws_iam_role.authorizer.name
-  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole"
-}
-
-resource "aws_iam_role_policy" "authorizer_secrets" {
-  role = aws_iam_role.authorizer.id
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [{
-      Effect   = "Allow"
-      Action   = ["secretsmanager:GetSecretValue"]
-      Resource = aws_secretsmanager_secret.jwt.arn
-    }]
-  })
-}
-
-resource "aws_iam_role" "notification" {
-  name = "siase-auth-notification-${var.environment}"
-
-  assume_role_policy = aws_iam_role.token.assume_role_policy
-}
-
-resource "aws_iam_role_policy_attachment" "notification_logs" {
-  role       = aws_iam_role.notification.name
-  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
-}
-
-resource "aws_iam_role_policy_attachment" "notification_vpc" {
-  role       = aws_iam_role.notification.name
-  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole"
-}
-
 data "archive_file" "lambda" {
   type        = "zip"
   source_dir  = path.module == "" ? "." : "${path.module}/.."
@@ -100,7 +16,7 @@ data "archive_file" "lambda" {
 
 resource "aws_lambda_function" "token" {
   function_name    = "siase-auth-token-${var.environment}"
-  role             = aws_iam_role.token.arn
+  role             = var.lab_role_arn
   handler          = "src/token-handler.handler"
   runtime          = "nodejs20.x"
   filename         = data.archive_file.lambda.output_path
@@ -115,8 +31,10 @@ resource "aws_lambda_function" "token" {
 
   environment {
     variables = {
-      JWT_SECRET_ARN = aws_secretsmanager_secret.jwt.arn
-      DB_SECRET_ARN  = aws_secretsmanager_secret.db.arn
+      JWT_SECRET_ARN = data.aws_secretsmanager_secret.jwt.arn
+      DB_SECRET_ARN  = data.aws_ssm_parameter.db_secret_arn.value
+      DB_HOST        = data.aws_ssm_parameter.db_endpoint.value
+      DB_NAME        = data.aws_ssm_parameter.db_name.value
       JWT_ISSUER     = var.jwt_issuer
       JWT_EXPIRATION = var.jwt_expiration
     }
@@ -125,7 +43,7 @@ resource "aws_lambda_function" "token" {
 
 resource "aws_lambda_function" "authorizer" {
   function_name    = "siase-auth-authorizer-${var.environment}"
-  role             = aws_iam_role.authorizer.arn
+  role             = var.lab_role_arn
   handler          = "src/authorizer.handler"
   runtime          = "nodejs20.x"
   filename         = data.archive_file.lambda.output_path
@@ -140,7 +58,7 @@ resource "aws_lambda_function" "authorizer" {
 
   environment {
     variables = {
-      JWT_SECRET_ARN = aws_secretsmanager_secret.jwt.arn
+      JWT_SECRET_ARN = data.aws_secretsmanager_secret.jwt.arn
       JWT_ISSUER     = var.jwt_issuer
     }
   }
@@ -148,7 +66,7 @@ resource "aws_lambda_function" "authorizer" {
 
 resource "aws_lambda_function" "notification" {
   function_name    = "siase-auth-notification-${var.environment}"
-  role             = aws_iam_role.notification.arn
+  role             = var.lab_role_arn
   handler          = "src/notification.handler"
   runtime          = "nodejs20.x"
   filename         = data.archive_file.lambda.output_path
@@ -206,7 +124,10 @@ resource "aws_apigatewayv2_integration" "application" {
   api_id             = aws_apigatewayv2_api.http.id
   integration_type   = "HTTP_PROXY"
   integration_method = "ANY"
-  integration_uri    = "http://${local.alb_dns}"
+  integration_uri    = "http://${local.lb_dns}"
+  request_parameters = {
+    "overwrite:path" = "$request.path.proxy"
+  }
 }
 
 resource "aws_apigatewayv2_route" "token" {
