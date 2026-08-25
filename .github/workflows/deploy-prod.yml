@@ -39,8 +39,9 @@ jobs:
           TF_VAR_lambda_security_group_id: ${{ vars.LAMBDA_SECURITY_GROUP_ID }}
           TF_VAR_jwt_secret_name: ${{ vars.JWT_SECRET_NAME }}
           TF_VAR_lb_dns_override: ${{ vars.LB_DNS_OVERRIDE }}
+          PRIVATE_SUBNET_IDS_CSV: ${{ vars.PRIVATE_SUBNET_IDS }}
         run: |
-          export TF_VAR_private_subnet_ids="$(printf '%s' '${{ vars.PRIVATE_SUBNET_IDS }}' | jq -R 'split(\",\")')"
+          export TF_VAR_private_subnet_ids="$(printf '%s' "$PRIVATE_SUBNET_IDS_CSV" | jq -Rc 'split(",")')"
           terraform init -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" \
             -backend-config="region=${{ vars.AWS_REGION }}"
           terraform apply -auto-approve
