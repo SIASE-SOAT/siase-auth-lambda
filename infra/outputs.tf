@@ -8,7 +8,8 @@ output "jwt_secret_arn" {
 }
 
 output "db_secret_arn" {
-  value = data.aws_ssm_parameter.db_secret_arn.value
+  value     = data.aws_ssm_parameter.db_secret_arn.value
+  sensitive = true
 }
 
 output "notification_topic_arn" {
