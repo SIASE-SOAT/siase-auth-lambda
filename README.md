@@ -1,14 +1,88 @@
-# SIASE Auth Lambda
+# siase-auth-lambda
 
-Siase: Autenticação de clientes por CPF, Lambda Authorizer para o
-API Gateway HTTP API e notificação assíncrona por SNS. O runtime das funções é
-Node.js 20, sem framework HTTP.
+> Pos Tech - Software Architecture | FIAP | Fase 3 — Autenticacao Serverless e API Gateway
 
+## Descricao da Solucao
+
+Repositorio responsavel pela autenticacao de clientes do SIASE via CPF, pelo Lambda Authorizer do API Gateway e pelas notificacoes assincronas via SNS. O runtime das funcoes e Node.js 20, sem framework HTTP, com foco em seguranca, baixa latencia e custo por invocacao.
+
+## Tecnologias
+
+| Tecnologia              | Versao  | Justificativa                                                                 |
+|-------------------------|---------|-------------------------------------------------------------------------------|
+| Node.js                 | 20      | Runtime leve, cold start reduzido, ideal para funcoes de autenticacao         |
+| AWS Lambda              | —       | Serverless — escala automaticamente, custo por invocacao, sem servidores      |
+| AWS API Gateway HTTP API| —       | Roteamento, autorizacao e integracao com Lambda e ALB                         |
+| AWS Secrets Manager     | —       | Armazenamento seguro do segredo JWT e credenciais do banco                    |
+| AWS SNS + SQS (DLQ)     | —       | Notificacoes assincronas com fila de mensagens mortas                         |
+| PostgreSQL (RDS)        | 16      | Consulta de existencia e status do cliente via pool de conexoes               |
+| Terraform               | 1.7+    | Provisionamento declarativo de toda a infraestrutura serverless               |
+| GitHub Actions (OIDC)   | —       | CI/CD sem chaves de acesso estaticas                                          |
 
 ## Arquitetura
 
-O token usa o contrato compartilhado com `siase-app`:
+```
+                        Internet
+                            │
+                            ▼
+                   ┌─────────────────┐
+                   │   API Gateway   │
+                   │   HTTP API      │
+                   └────────┬────────┘
+                            │
+              ┌─────────────┼──────────────────┐
+              │             │                  │
+              ▼             ▼                  ▼
+    POST /auth/token   ANY /{proxy+}      (Authorizer)
+              │        (protegida)             │
+              ▼             │                  │
+    ┌──────────────┐        │        ┌─────────────────────┐
+    │ Lambda Token │        │        │  Lambda Authorizer  │
+    │              │        │        │  verifica JWT HS256 │
+    │ valida CPF   │        │        │  issuer, exp,       │
+    │ consulta RDS │        │        │  clienteId          │
+    │ emite JWT    │        │        └─────────────────────┘
+    └──────┬───────┘        │
+           │                ▼
+           │      ┌──────────────────┐
+           │      │  siase-app (EKS) │
+           │      │  via ALB         │
+           │      └──────────────────┘
+           │
+           ▼
+    ┌──────────────────┐    ┌──────────────────┐
+    │  RDS PostgreSQL  │    │  Secrets Manager │
+    │  (subnet privada)│    │  JWT + DB creds  │
+    └──────────────────┘    └──────────────────┘
 
+    ┌──────────────────────────────────────────┐
+    │  SNS Topic → Lambda Notification → DLQ   │
+    │  (notificacoes assincronas de clientes)  │
+    └──────────────────────────────────────────┘
+```
+
+## Funcoes Lambda
+
+### `POST /auth/token` — Lambda de Token
+
+Recebe o CPF do cliente, valida, consulta o RDS e emite um JWT.
+
+**Request:**
+```json
+{ "cpf": "529.982.247-25" }
+```
+
+**Respostas:**
+
+| Situacao                                    | HTTP | Codigo                   |
+|---------------------------------------------|------|--------------------------|
+| CPF invalido, repetido ou tamanho incorreto | 400  | `CPF_INVALIDO`           |
+| CPF valido, cliente nao encontrado          | 404  | `CLIENTE_NAO_ENCONTRADO` |
+| Cliente encontrado, mas inativo             | 403  | `CLIENTE_INATIVO`        |
+| Cliente ativo                               | 200  | JWT Bearer               |
+| Erro interno                                | 500  | `ERRO_INTERNO`           |
+
+**Token emitido:**
 ```json
 {
   "sub": "52998224725",
@@ -21,167 +95,113 @@ O token usa o contrato compartilhado com `siase-app`:
 }
 ```
 
-## Funções
-
-### `POST /auth/token`
-
-Recebe:
-
-```json
-{ "cpf": "529.982.247-25" }
-```
-
-O CPF é normalizado, validado pelos dois dígitos verificadores e consultado na
-coluna `clientes.documento` do RDS. As respostas são distintas:
-
-| Situação | HTTP | Código |
-| --- | ---: | --- |
-| CPF inválido, repetido ou com tamanho incorreto | 400 | `CPF_INVALIDO` |
-| CPF válido sem cliente | 404 | `CLIENTE_NAO_ENCONTRADO` |
-| Cliente encontrado, mas inativo | 403 | `CLIENTE_INATIVO` |
-| Cliente ativo | 200 | JWT Bearer |
-
-Nenhuma consulta ao banco acontece para CPF inválido. Erros internos retornam
-somente `ERRO_INTERNO`, sem detalhes de conexão ou SQL.
-
 ### Lambda Authorizer
 
-É um authorizer REQUEST para payload v2 e respostas simples. Verifica:
+Authorizer REQUEST para payload v2 com respostas simples. Verifica:
+- Assinatura HS256
+- `issuer` = `siase-auth`
+- Expiracao
+- Presenca de `clienteId` (caracteriza token de cliente externo)
 
-- assinatura HS256;
-- `issuer`;
-- expiração;
-- presença de `clienteId`, que caracteriza o token externo emitido por esta
-  etapa.
+O contexto retornado ao API Gateway contem `sub`, `clienteId` e `roles` (string separada por virgulas).
 
-O contexto simples contém `sub`, `clienteId` e `roles`. Como o contexto simples
-do API Gateway usa valores escalares, `roles` é enviado como uma string separada
-por vírgulas.
+### Lambda de Notificacao
 
-### Lambda de notificação
+Consome registros SNS, valida `clienteId` e `subject`, formata e registra a notificacao em JSON estruturado com `correlationId`. Mensagens invalidas lancam erro para encaminhamento a DLQ.
 
-Consome registros SNS, formata a mensagem para o cliente e registra JSON com
-`correlationId`, `clienteId`, `subject` e `notification`. Mensagens inválidas
-lançam erro para que o SNS possa encaminhar a falha à DLQ. O envio real por
-e-mail/SMS não faz parte desta etapa.
+## Recursos Criados pelo Terraform
 
-## Como rodar localmente
+| Recurso                          | Tipo                    | Descricao                                              |
+|----------------------------------|-------------------------|--------------------------------------------------------|
+| `aws_lambda_function.token`      | Lambda Node.js 20       | Autenticacao de clientes via CPF                       |
+| `aws_lambda_function.authorizer` | Lambda Node.js 20       | Validacao de JWT para rotas protegidas                 |
+| `aws_lambda_function.notification`| Lambda Node.js 20      | Processamento de notificacoes SNS                      |
+| `aws_apigatewayv2_api.http`      | API Gateway HTTP API    | Ponto de entrada unico da aplicacao                    |
+| `aws_apigatewayv2_authorizer`    | Lambda Authorizer       | Protege `ANY /{proxy+}` com JWT                        |
+| `aws_apigatewayv2_route.token`   | Rota publica            | `POST /auth/token` sem autorizacao                     |
+| `aws_apigatewayv2_route.application` | Rota protegida      | `ANY /{proxy+}` com Lambda Authorizer                  |
+| `aws_sns_topic.notification`     | SNS Topic               | Topico de notificacoes de clientes                     |
+| `aws_sqs_queue.notification_dlq` | SQS Queue               | Fila de mensagens mortas para falhas de notificacao    |
+| `aws_ssm_parameter.api_endpoint` | SSM Parameter           | Endpoint do API Gateway publicado para outros servicos |
 
-Requisitos:
+## Variaveis Terraform
 
-- Node.js 20;
-- npm;
-- PostgreSQL acessível se for executar a Lambda de token sem mock;
-- valores locais dos segredos, nunca commitados.
+| Variavel                  | Padrao       | Descricao                                              |
+|---------------------------|--------------|--------------------------------------------------------|
+| `aws_region`              | —            | Regiao AWS (obrigatoria)                               |
+| `environment`             | `production` | Ambiente                                               |
+| `vpc_id`                  | —            | VPC onde a Lambda acessa o RDS                         |
+| `private_subnet_ids`      | —            | Subnets privadas para a Lambda de token                |
+| `lambda_security_group_id`| —            | SG com acesso de saida ao RDS                          |
+| `lab_role_arn`            | —            | ARN da LabRole do AWS Academy                          |
+| `jwt_secret_name`         | —            | Nome do segredo JWT no Secrets Manager                 |
+| `jwt_issuer`              | `siase-auth` | Issuer do JWT                                          |
+| `jwt_expiration`          | `1h`         | Tempo de expiracao do token                            |
+| `lambda_memory_size`      | `256`        | Memoria das Lambdas em MB                              |
+| `lambda_timeout`          | `10`         | Timeout das Lambdas em segundos                        |
 
-Instale exatamente as versões do lockfile:
+## Como Rodar Localmente
+
+**Pre-requisitos:** Node.js 20, npm.
 
 ```bash
+# Instalar dependencias (versoes exatas do lockfile)
 npm ci
-```
 
-Execute os testes:
-
-```bash
+# Executar testes
 node --test
 ```
 
-Para executar a função diretamente, importe o handler em um runner local ou use
-um emulador de Lambda. As variáveis necessárias são:
-
+**Variaveis necessarias para execucao sem mock:**
 ```bash
-export JWT_SECRET_ARN=arn:aws:secretsmanager:REGION:ACCOUNT:secret:siase/homolog/jwt
-export DB_SECRET_ARN=arn:aws:secretsmanager:REGION:ACCOUNT:secret:siase/homolog/database
+export JWT_SECRET_ARN=arn:aws:secretsmanager:REGION:ACCOUNT:secret:siase/production/jwt
+export DB_SECRET_ARN=arn:aws:secretsmanager:REGION:ACCOUNT:secret:siase/production/database
 export JWT_ISSUER=siase-auth
 export JWT_EXPIRATION=1h
 ```
 
-O segredo JWT deve ser JSON com a chave `secret`:
-
+**Formato do segredo JWT:**
 ```json
 { "secret": "valor-base64-com-pelo-menos-32-bytes" }
 ```
 
-O segredo do banco deve conter pelo menos:
-
+**Formato do segredo do banco:**
 ```json
 {
   "host": "endpoint-do-rds",
   "port": 5432,
   "database": "siase_db",
-  "username": "siase",
+  "username": "siase_master",
   "password": "FORA_DO_GIT"
 }
 ```
 
-Os segredos são lidos pelo Secrets Manager e mantidos em cache na memória da
-execução Lambda. Uma nova instância fria faz nova leitura.
+## Deploy e Infraestrutura
 
-## Infraestrutura Terraform
+### Pre-requisitos
 
-O diretório `infra/` cria:
+- Terraform 1.7+
+- `siase-infra-k8s` ja aplicado (publica VPC, subnets e SG via SSM)
+- `siase-infra-database` ja aplicado (publica endpoint e ARN do segredo do banco via SSM)
+- Segredo JWT criado manualmente no Secrets Manager
 
-- três Lambdas Node.js 20;
-- roles IAM separadas;
-- permissão mínima de `secretsmanager:GetSecretValue`;
-- VPC configuration das três Lambdas nas subnets privadas; a VPC precisa de
-  NAT ou endpoints privados para os serviços AWS usados pelas funções;
-- API Gateway HTTP API;
-- rota pública `POST /auth/token`;
-- rota `ANY /{proxy+}` protegida pelo Lambda Authorizer;
-- integração HTTP com o DNS do ALB;
-- tópico SNS, assinatura da Lambda de notificação e fila SQS de DLQ;
-- segredos do Secrets Manager sem valor inicial.
+### Aplicar
 
+```bash
+# 1. Copiar e ajustar variaveis
+cp infra/environments/production.tfvars.example infra/environments/production.tfvars
 
-O recurso `aws_secretsmanager_secret` cria o nome/ARN, mas não grava o valor no
-código. A versão/valor não é gerenciada pelo Terraform: isso evita que um
-`apply` sobrescreva a versão definida operacionalmente e tem o mesmo efeito
-prático de ignorar alterações de versão.
+# 2. Inicializar backend
+terraform -chdir=infra init
 
-- `aws_region`;
-- `environment` (`homolog` ou `production`);
-- `vpc_id`;
-- `private_subnet_ids`;
-- `lambda_security_group_id`;
-- nomes dos segredos;
-- bucket S3 e tabela DynamoDB do state;
-- parâmetro SSM do ALB ou `alb_dns_override`.
+# 3. Visualizar plano
+terraform -chdir=infra plan -var-file=environments/production.tfvars
 
-## CI/CD com OIDC
+# 4. Aplicar
+terraform -chdir=infra apply -var-file=environments/production.tfvars
+```
 
-Os workflows são:
-
-- `build-test.yml`: reutilizável via `workflow_call`;
-- `ci.yml`: pull requests para `main` e `develop`;
-- `deploy-homolog.yml`: push na `develop`;
-- `deploy-prod.yml`: push na `main`.
-
-O deploy depende de `needs: build-test`. A AWS é acessada com OIDC e
-`id-token: write`; não há chave AWS estática, PAT, senha ou SSH.
-
-| Tipo | Nome | Descrição |
-| --- | --- | --- |
-| Variable | `AWS_REGION` | Região AWS |
-| Variable | `TF_STATE_BUCKET` | Bucket S3 do state |
-| Variable | `TF_LOCK_TABLE` | Tabela DynamoDB de lock |
-| Variable | `VPC_ID` | VPC do ambiente |
-| Variable | `PRIVATE_SUBNET_IDS` | IDs separados por vírgula; o workflow converte para lista Terraform |
-| Variable | `LAMBDA_SECURITY_GROUP_ID` | SG da Lambda de token |
-| Variable | `DB_SECRET_NAME` | Nome do segredo de banco |
-| Variable | `JWT_SECRET_NAME` | Nome do segredo JWT |
-| Variable | `ALB_DNS_OVERRIDE` | Opcional; vazio usa SSM |
-| Secret | `AWS_DEPLOY_ROLE_ARN` | ARN da role confiável para OIDC |
-
-
-## API, OpenAPI e Postman
-
-- Especificação: [`docs/openapi.yaml`](docs/openapi.yaml)
-- Collection: [`docs/postman/siase-auth.postman_collection.json`](docs/postman/siase-auth.postman_collection.json)
-
-
-
-## Verificações locais
+### Validacao local
 
 ```bash
 npm ci
@@ -191,6 +211,44 @@ terraform -chdir=infra init -backend=false
 terraform -chdir=infra validate
 ```
 
-O teste `test/token-handler.test.js` cobre CPF inválido, cliente inexistente,
-cliente inativo e sucesso, incluindo a decodificação e validação dos claims do
-JWT.
+## CI/CD
+
+| Workflow           | Gatilho                        | O que faz                                                    |
+|--------------------|--------------------------------|--------------------------------------------------------------|
+| `build-test.yml`   | Reutilizavel via workflow_call | `npm ci`, `node --test`, `tf fmt -check`, `tf validate`      |
+| `ci.yml`           | Pull Request para main/develop | Chama build-test                                             |
+| `deploy-prod.yml`  | Push na main                   | `npm ci`, `terraform apply` com credenciais temporarias do Learner Lab |
+
+**Observacao sobre autenticacao AWS:** o Learner Lab nao suporta OIDC. O workflow usa credenciais temporarias (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`) que expiram a cada sessao de 4h e precisam ser atualizadas manualmente nos secrets do GitHub.
+
+O `deploy-prod.yml` passa as variaveis Terraform via `TF_VAR_*` e converte `PRIVATE_SUBNET_IDS` de CSV para lista JSON antes do apply.
+
+**GitHub Variables necessarias (Environment `production`):**
+
+| Nome                          | Descricao                              |
+|-------------------------------|----------------------------------------|
+| `AWS_REGION`                  | Regiao AWS                             |
+| `TF_STATE_BUCKET`             | Bucket S3 do estado Terraform          |
+| `VPC_ID`                      | VPC do ambiente                        |
+| `PRIVATE_SUBNET_IDS`          | IDs das subnets privadas separados por virgula |
+| `LAMBDA_SECURITY_GROUP_ID`    | SG da Lambda de token                  |
+| `JWT_SECRET_NAME`             | Nome do segredo JWT no Secrets Manager |
+| `LAB_ROLE_ARN`                | ARN da LabRole do AWS Academy          |
+| `LB_DNS_OVERRIDE`             | Opcional; vazio usa SSM                |
+
+**GitHub Secrets necessarios:**
+
+| Nome                    | Descricao                                      |
+|-------------------------|------------------------------------------------|
+| `AWS_ACCESS_KEY_ID`     | Chave de acesso temporaria do Learner Lab       |
+| `AWS_SECRET_ACCESS_KEY` | Chave secreta temporaria do Learner Lab         |
+| `AWS_SESSION_TOKEN`     | Token de sessao temporario do Learner Lab       |
+
+## Documentacao
+
+- [Diagramas de Sequencia](docs/diagramas-sequencia.md)
+- [ADR-001 — Autenticacao de Clientes via CPF com Lambda Serverless](docs/adr/ADR-001-autenticacao-cpf-lambda.md)
+- [ADR-002 — Escolha da AWS como Provedor de Nuvem](docs/adr/ADR-002-escolha-aws.md)
+- [RFC-001 — Estrategia de Autenticacao e Contrato JWT](docs/rfc/RFC-001-estrategia-autenticacao.md)
+- [OpenAPI](docs/openapi.yaml)
+- [Postman Collection](docs/postman/siase-auth.postman_collection.json)
